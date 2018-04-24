@@ -108,6 +108,7 @@
 #define DEFAULTCISCOPORT "9995"
 #define DEFAULTHOSTNAME "127.0.0.1"
 #define SENDSOCK_BUFFSIZE 200000
+#define MAX_PEERS 5
 
 #ifndef DEVEL
 #   define dbg_printf(...) /* printf(__VA_ARGS__) */
@@ -146,7 +147,7 @@ static void daemonize(void);
 
 static void SetPriv(char *userid, char *groupid );
 
-static void run(packet_function_t receive_packet, int socket, send_peer_t peer, 
+static void run(packet_function_t receive_packet, int socket, int number_peers, send_peer_t *peers[], 
 	time_t twin, time_t t_begin, int report_seq, int use_subdirs, char *time_extension, int compress);
 
 /* Functions */
@@ -358,7 +359,7 @@ int		err;
 #include "nffile_inline.c"
 #include "collector_inline.c"
 
-static void run(packet_function_t receive_packet, int socket, send_peer_t peer, 
+static void run(packet_function_t receive_packet, int socket, int number_peers, send_peer_t *peers[],
 	time_t twin, time_t t_begin, int report_seq, int use_subdirs, char *time_extension, int compress) {
 common_flow_header_t	*nf_header;
 FlowSource_t			*fs;
@@ -373,6 +374,7 @@ void 		*in_buff;
 int 		err;
 char 		*string;
 srecord_t	*commbuff;
+send_peer_t	*peer;
 
 	if ( !Init_v1() || !Init_v5_v7_input() || !Init_v9() || !Init_IPFIX() )
 		return;
@@ -443,9 +445,11 @@ srecord_t	*commbuff;
 				continue;
 			}
 
-			if ( peer.hostname ) {
+			// TODO: Itterate through peer list
+			if ( number_peers > 0 ) {
 				ssize_t len;
-				len = sendto(peer.sockfd, in_buff, cnt, 0, (struct sockaddr *)&(peer.addr), peer.addrlen);
+				peer = peers[0];
+				len = sendto(peer->sockfd, in_buff, cnt, 0, (struct sockaddr *)&(peer->addr), peer->addrlen);
 				if ( len < 0 ) {
 					LogError("ERROR: sendto(): %s", strerror(errno));
 				}
@@ -745,7 +749,10 @@ char	*userid, *groupid, *checkptr, *listenport, *mcastgroup, *extension_tags;
 char	*Ident, *dynsrcdir, *time_extension, pidfile[MAXPATHLEN];
 struct stat fstat;
 packet_function_t receive_packet;
-send_peer_t  peer;
+// send_peer_t  peer;
+int     number_peers;
+send_peer_t	*peers[MAX_PEERS];
+send_peer_t *peer;
 FlowSource_t *fs;
 struct sigaction act;
 int		family, bufflen;
@@ -780,12 +787,19 @@ char	*pcap_file;
 	expire			= 0;
 	sampling_rate	= 1;
 	compress		= NOT_COMPRESSED;
-	memset((void *)&peer, 0, sizeof(send_peer_t));
-	peer.family		= AF_UNSPEC;
+	number_peers	= 0;
+	// memset((void *)&peer, 0, sizeof(send_peer_t));
+	// peer.family		= AF_UNSPEC;
 	Ident			= "none";
 	FlowSource		= NULL;
 	extension_tags	= DefaultExtensions;
 	dynsrcdir		= NULL;
+
+	// peers  = (struct send_peer_t)malloc(MAX_PEERS * sizeof(struct send_peer_t));
+	// if ( !peers ) {
+	// 	LogError("malloc() allocation error in %s line %d: %s\n", __FILE__, __LINE__, strerror(errno) );
+	// 	exit(255);
+	// }
 
 	while ((c = getopt(argc, argv, "46ef:whEVI:DB:b:jl:J:M:n:p:P:R:S:s:T:t:x:Xru:g:zZ")) != EOF) {
 		switch (c) {
@@ -886,15 +900,34 @@ char	*pcap_file;
 				pidfile[MAXPATHLEN-1] = 0;
 				break;
 			case 'R': {
+				if(number_peers >= MAX_PEERS) {
+					fprintf(stderr, "Too many peers supplied: %d\n", MAX_PEERS);
+					exit(255);
+				}
+				peers[number_peers] = malloc(sizeof(send_peer_t));
+				fprintf(stderr, "memory addr %x\n", peers[number_peers]);
+				if ( !peers[number_peers] ) {
+					LogError("malloc() allocation error in %s line %d: %s\n", __FILE__, __LINE__, strerror(errno) );
+					exit(255);
+				}
+				peer = peers[number_peers];
+				fprintf(stderr, "memory addr %x\n", peers[number_peers]);
+				fprintf(stderr, "peer %x\n", peer);
+				fprintf(stderr, "peer %x\n", &peer);
+				// memset((void *)&peer, 0, sizeof(send_peer_t));
+				memset((void *)peer, 0, sizeof(send_peer_t));
+				peer->family	= AF_UNSPEC;
+
 				char *p = strchr(optarg, '/');
 				if ( p ) { 
 					*p++ = '\0';
-					peer.port = strdup(p);
+					peer->port = strdup(p);
 				} else {
-					peer.port = DEFAULTCISCOPORT;
+					peer->port = DEFAULTCISCOPORT;
 				}
-				peer.hostname = strdup(optarg);
-
+				peer->hostname = strdup(optarg);
+				fprintf(stderr, "Replicate Packets setto %s/%s\n", peer->hostname, peer->port);
+				number_peers++;
 				break; }
 			case 'r':
 				report_sequence = 1;
@@ -1040,12 +1073,13 @@ char	*pcap_file;
 		exit(255);
 	}
 
-	if ( peer.hostname ) {
-		peer.sockfd = Unicast_send_socket (peer.hostname, peer.port, peer.family, bufflen, 
-											&peer.addr, &peer.addrlen );
-		if ( peer.sockfd <= 0 )
+	if ( number_peers > 0 ) {
+		peer = peers[0];
+		peer->sockfd = Unicast_send_socket (peer->hostname, peer->port, peer->family, bufflen, 
+											&peer->addr, &peer->addrlen );
+		if ( peer->sockfd <= 0 )
 			exit(255);
-		LogInfo("Replay flows to host: %s port: %s", peer.hostname, peer.port);
+		LogInfo("Replay flows to host: %s port: %s", peer->hostname, peer->port);
 	}
 
 	if ( sampling_rate < 0 ) {
@@ -1205,7 +1239,7 @@ char	*pcap_file;
 	sigaction(SIGCHLD, &act, NULL);
 
 	LogInfo("Startup.");
-	run(receive_packet, sock, peer, twin, t_start, report_sequence, subdir_index, 
+	run(receive_packet, sock, number_peers,peers, twin, t_start, report_sequence, subdir_index, 
 		time_extension, compress);
 	close(sock);
 	kill_launcher(launcher_pid);
